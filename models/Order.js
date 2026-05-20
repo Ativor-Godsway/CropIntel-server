@@ -31,7 +31,7 @@ const orderSchema = new mongoose.Schema(
     // Optional link to the diagnosis that triggered this order
     diagnosisId: { type: mongoose.Schema.Types.ObjectId, ref: 'Diagnosis' },
   },
-  { timestamps: true }
+  { timestamps: true, strict: true }
 );
 
 orderSchema.index({ buyer: 1, createdAt: -1 });

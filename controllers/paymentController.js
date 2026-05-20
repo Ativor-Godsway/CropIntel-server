@@ -1,110 +1,167 @@
+const crypto   = require('crypto');
 const { v4: uuidv4 } = require('uuid');
-const Order = require('../models/Order');
-const Product = require('../models/Product');
-const User = require('../models/User');
+const Order    = require('../models/Order');
+const Product  = require('../models/Product');
+const User     = require('../models/User');
+const mongoose = require('mongoose');
 const { initializePayment, verifyPayment } = require('../services/paystackService');
+const catchAsync = require('../utils/catchAsync');
+const logger     = require('../utils/logger');
+const config     = require('../config');
 
-/**
- * POST /api/payments/initialize
- * Creates a Paystack transaction for a given order.
- */
-const initializeTransaction = async (req, res, next) => {
+// ─── POST /api/payments/initialize ────────────────────────────────────────────
+
+const initializeTransaction = catchAsync(async (req, res) => {
+  const { orderId } = req.body;
+
+  if (!mongoose.isValidObjectId(orderId)) {
+    return res.status(400).json({ message: 'Invalid order ID' });
+  }
+
+  const order = await Order.findOne({ _id: orderId, buyer: req.user.id });
+  if (!order) return res.status(404).json({ message: 'Order not found' });
+
+  if (order.status !== 'pending') {
+    return res.status(400).json({ message: 'Order is already paid or cancelled' });
+  }
+
+  const reference = `CROPINTEL-${uuidv4().replace(/-/g, '').slice(0, 16).toUpperCase()}`;
+  order.paystackReference = reference;
+  await order.save();
+
+  const result = await initializePayment({
+    email:       req.user.email,
+    amount:      order.totalAmount,
+    reference,
+    callbackUrl: `${config.CLIENT_URL}/checkout/verify?reference=${reference}`,
+    metadata: {
+      orderId: order._id.toString(),
+      userId:  req.user.id.toString(),
+    },
+  });
+
+  if (!result.status) {
+    return res.status(502).json({ message: 'Failed to initialize payment' });
+  }
+
+  res.json({
+    authorizationUrl: result.data.authorization_url,
+    reference,
+    accessCode: result.data.access_code,
+  });
+});
+
+// ─── GET /api/payments/verify/:reference ──────────────────────────────────────
+
+const verifyTransaction = catchAsync(async (req, res) => {
+  const { reference } = req.params;
+
+  const order = await Order.findOne({ paystackReference: reference }).populate('items.product');
+  if (!order) return res.status(404).json({ message: 'Order not found for this reference' });
+
+  if (order.status !== 'pending') {
+    return res.json({ order, message: 'Already processed' });
+  }
+
+  const result = await verifyPayment(reference);
+  if (!result.status || result.data.status !== 'success') {
+    return res.status(402).json({ message: 'Payment not successful' });
+  }
+
+  order.status                = 'paid';
+  order.paystackTransactionId = result.data.id?.toString();
+  await order.save();
+
+  await _updateStockAndSales(order);
+  await order.populate('items.product', 'name images price');
+  res.json({ order, message: 'Payment verified successfully' });
+});
+
+// ─── POST /api/payments/webhook (raw body, HMAC verified) ─────────────────────
+
+const handleWebhook = async (req, res) => {
   try {
-    const { orderId } = req.body;
+    const signature = req.headers['x-paystack-signature'];
+    const rawBody   = req.body; // Buffer from express.raw()
 
-    const order = await Order.findOne({ _id: orderId, buyer: req.user._id });
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-
-    if (order.status !== 'pending') {
-      return res.status(400).json({ message: 'Order is already paid or cancelled' });
+    if (!signature) {
+      logger.warn('Paystack webhook: missing signature header', { ip: req.ip });
+      return res.status(401).json({ message: 'Missing signature' });
     }
 
-    // Generate unique reference for this transaction
-    const reference = `FARMLY-${uuidv4().replace(/-/g, '').slice(0, 16).toUpperCase()}`;
-    order.paystackReference = reference;
-    await order.save();
+    // HMAC-SHA512 verification
+    const computedHex = crypto
+      .createHmac('sha512', config.PAYSTACK_SECRET_KEY)
+      .update(rawBody)
+      .digest('hex');
 
-    const result = await initializePayment({
-      email: req.user.email,
-      amount: order.totalAmount, // already in pesewas
-      reference,
-      callbackUrl: `${process.env.CLIENT_URL}/checkout/verify?reference=${reference}`,
-      metadata: {
-        orderId: order._id.toString(),
-        userId: req.user._id.toString(),
-      },
-    });
+    const sigBuf  = Buffer.from(signature,    'hex');
+    const compBuf = Buffer.from(computedHex,  'hex');
 
-    if (!result.status) {
-      return res.status(502).json({ message: 'Failed to initialize payment' });
+    if (
+      sigBuf.length  !== compBuf.length ||
+      !crypto.timingSafeEqual(sigBuf, compBuf)
+    ) {
+      logger.warn('Paystack webhook: invalid HMAC signature', { ip: req.ip });
+      return res.status(401).json({ message: 'Invalid signature' });
     }
 
-    res.json({
-      authorizationUrl: result.data.authorization_url,
-      reference,
-      accessCode: result.data.access_code,
-    });
+    let event;
+    try {
+      event = JSON.parse(rawBody.toString());
+    } catch {
+      return res.status(400).json({ message: 'Invalid JSON body' });
+    }
+
+    const { event: eventType, data } = event;
+
+    if (eventType === 'charge.success') {
+      // Idempotency: skip if already processed
+      const order = await Order.findOne({ paystackReference: data.reference });
+      if (!order) return res.status(200).json({ received: true });
+      if (order.status !== 'pending') return res.status(200).json({ received: true, note: 'already processed' });
+
+      order.status                = 'paid';
+      order.paystackTransactionId = data.id?.toString();
+      await order.save();
+
+      const populated = await Order.findById(order._id).populate('items.product');
+      await _updateStockAndSales(populated);
+
+    } else if (['transfer.failed', 'transfer.reversed'].includes(eventType)) {
+      logger.warn(`Paystack event: ${eventType}`, { reference: data.reference });
+    }
+
+    res.status(200).json({ received: true });
   } catch (err) {
-    next(err);
+    logger.error('Webhook processing error', { error: err.message, stack: err.stack });
+    res.status(200).json({ received: true }); // Always 200 to prevent Paystack retries
   }
 };
 
-/**
- * GET /api/payments/verify/:reference
- * Called after Paystack redirect. Verifies the payment and updates the order.
- */
-const verifyTransaction = async (req, res, next) => {
-  try {
-    const { reference } = req.params;
+// ─── Internal helper ──────────────────────────────────────────────────────────
 
-    const order = await Order.findOne({ paystackReference: reference }).populate('items.product');
-    if (!order) return res.status(404).json({ message: 'Order not found for this reference' });
+const _updateStockAndSales = async (order) => {
+  for (const item of order.items) {
+    const productId = item.product?._id || item.product;
+    await Product.findByIdAndUpdate(productId, {
+      $inc: { stock: -item.quantity, sales: item.quantity },
+    });
+  }
 
-    // Prevent double-processing
-    if (order.status !== 'pending') {
-      return res.json({ order, message: 'Already processed' });
+  // Update seller totalSales
+  const sellerRevenue = {};
+  for (const item of order.items) {
+    const productId = item.product?._id || item.product;
+    const product   = await Product.findById(productId).select('seller');
+    if (product) {
+      const sid = product.seller.toString();
+      sellerRevenue[sid] = (sellerRevenue[sid] || 0) + item.priceAtPurchase * item.quantity;
     }
-
-    const result = await verifyPayment(reference);
-
-    if (!result.status || result.data.status !== 'success') {
-      return res.status(402).json({ message: 'Payment not successful', data: result.data });
-    }
-
-    // Update order to paid
-    order.status = 'paid';
-    order.paystackTransactionId = result.data.id?.toString();
-    await order.save();
-
-    // Decrement stock and increment sales for each product
-    for (const item of order.items) {
-      await Product.findByIdAndUpdate(item.product._id, {
-        $inc: { stock: -item.quantity, sales: item.quantity },
-      });
-    }
-
-    // Update seller totalSales (sum of all their product sales amounts)
-    // Group items by seller
-    const sellerRevenue = {};
-    for (const item of order.items) {
-      const product = await Product.findById(item.product._id).select('seller');
-      if (product) {
-        const sellerId = product.seller.toString();
-        sellerRevenue[sellerId] = (sellerRevenue[sellerId] || 0) + item.priceAtPurchase * item.quantity;
-      }
-    }
-
-    for (const [sellerId, revenue] of Object.entries(sellerRevenue)) {
-      await User.findByIdAndUpdate(sellerId, {
-        $inc: { 'sellerProfile.totalSales': revenue },
-      });
-    }
-
-    await order.populate('items.product', 'name images price');
-    res.json({ order, message: 'Payment verified successfully' });
-  } catch (err) {
-    next(err);
+  }
+  for (const [sid, rev] of Object.entries(sellerRevenue)) {
+    await User.findByIdAndUpdate(sid, { $inc: { 'sellerProfile.totalSales': rev } });
   }
 };
 
-module.exports = { initializeTransaction, verifyTransaction };
+module.exports = { initializeTransaction, verifyTransaction, handleWebhook };

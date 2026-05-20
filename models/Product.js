@@ -19,7 +19,7 @@ const productSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     sales: { type: Number, default: 0 },
   },
-  { timestamps: true }
+  { timestamps: true, strict: true }
 );
 
 // Full-text search index on name and description

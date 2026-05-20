@@ -22,18 +22,21 @@ const generateOTP = () => {
 
 // Send OTP via Africa's Talking SMS
 const sendOTP = async (phone, otp) => {
-  const message = `Your Farmly verification code is: ${otp}. It expires in 10 minutes. Do not share this code.`;
+  const message = `Your CropIntel verification code is: ${otp}. It expires in 10 minutes. Do not share this code.`;
 
   // In development/sandbox mode we log the OTP instead of sending
   if (process.env.AT_USERNAME === 'sandbox') {
-    console.log(`[OTP SANDBOX] Phone: ${phone}, OTP: ${otp}`);
+    // In sandbox mode, log to console only in development so the OTP is visible during testing
+    if (process.env.NODE_ENV !== 'production') {
+      process.stdout.write(`[OTP SANDBOX] Phone: ${phone}, OTP: ${otp}\n`);
+    }
     return { status: 'sent (sandbox)' };
   }
 
   const result = await getSMS().send({
     to: [phone],
     message,
-    from: 'Farmly',
+    from: 'CropIntel',
   });
 
   return result;
