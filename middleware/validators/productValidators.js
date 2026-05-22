@@ -17,7 +17,7 @@ const validateProduct = [
     .escape(),
 
   body('price')
-    .isInt({ min: 1 }).withMessage('Price must be a positive integer (pesewas)'),
+    .isFloat({ min: 0.01 }).withMessage('Price must be a positive number'),
 
   body('stock')
     .isInt({ min: 0 }).withMessage('Stock must be a non-negative integer'),

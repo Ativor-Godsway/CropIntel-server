@@ -17,19 +17,18 @@ const signRefreshToken = (userId) =>
     expiresIn: config.JWT_REFRESH_EXPIRES_IN,
   });
 
+const COOKIE_OPTS = {
+  httpOnly: true,
+  secure:   true,
+  sameSite: 'none',
+  maxAge:   7 * 24 * 60 * 60 * 1000,
+  path:     '/',
+};
+
 const sendTokens = (res, user) => {
   const accessToken  = signAccessToken(user._id, user.email, user.activeRole);
   const refreshToken = signRefreshToken(user._id);
-  const isProduction = config.NODE_ENV === 'production';
-
-  res.cookie('refreshToken', refreshToken, {
-    httpOnly: true,
-    secure:   isProduction,
-    sameSite: isProduction ? 'none' : 'lax',
-    maxAge:   7 * 24 * 60 * 60 * 1000,
-    path:     '/',
-  });
-
+  res.cookie('refreshToken', refreshToken, COOKIE_OPTS);
   return { accessToken };
 };
 
@@ -133,6 +132,8 @@ const verifyOtp = catchAsync(async (req, res) => {
 // ─── Token management ──────────────────────────────────────────────────────────
 
 const refreshToken = catchAsync(async (req, res) => {
+  console.log('Cookies received:', req.cookies);
+
   const token = req.cookies.refreshToken;
   if (!token) return res.status(401).json({ message: 'No refresh token' });
 
@@ -140,6 +141,7 @@ const refreshToken = catchAsync(async (req, res) => {
   try {
     decoded = jwt.verify(token, config.JWT_REFRESH_SECRET);
   } catch (err) {
+    res.clearCookie('refreshToken', { ...COOKIE_OPTS, maxAge: undefined });
     if (err.name === 'TokenExpiredError') {
       return res.status(401).json({ message: 'Refresh token expired, please log in again' });
     }
@@ -149,18 +151,16 @@ const refreshToken = catchAsync(async (req, res) => {
   const user = await fetchUser(decoded.userId);
   if (!user) return res.status(401).json({ message: 'User not found' });
 
+  // Rotate: issue a fresh refresh token
+  const newRefresh = signRefreshToken(user._id);
+  res.cookie('refreshToken', newRefresh, COOKIE_OPTS);
+
   const accessToken = signAccessToken(user._id, user.email, user.activeRole);
   res.json({ accessToken, user });
 });
 
 const logout = (req, res) => {
-  const isProduction = config.NODE_ENV === 'production';
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure:   isProduction,
-    sameSite: isProduction ? 'none' : 'lax',
-    path:     '/',
-  });
+  res.clearCookie('refreshToken', { ...COOKIE_OPTS, maxAge: undefined });
   res.json({ message: 'Logged out successfully' });
 };
 

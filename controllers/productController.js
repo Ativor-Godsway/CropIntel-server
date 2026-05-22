@@ -50,6 +50,9 @@ const getProduct = catchAsync(async (req, res) => {
 // ─── POST /api/products ───────────────────────────────────────────────────────
 
 const createProduct = catchAsync(async (req, res) => {
+  console.log('Product body received:', req.body);
+  console.log('Product file received:', req.file, '| files:', req.files?.length);
+
   const { name, description, category, targetDiseases, price, stock } = req.body;
 
   let diseases = [];
