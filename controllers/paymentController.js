@@ -12,6 +12,8 @@ const config     = require('../config');
 // ─── POST /api/payments/initialize ────────────────────────────────────────────
 
 const initializeTransaction = catchAsync(async (req, res) => {
+  console.log('Initialize route hit', { orderId: req.body.orderId, user: req.user?.id });
+
   const { orderId } = req.body;
 
   if (!mongoose.isValidObjectId(orderId)) {
@@ -29,18 +31,25 @@ const initializeTransaction = catchAsync(async (req, res) => {
   order.paystackReference = reference;
   await order.save();
 
-  const result = await initializePayment({
-    email:       req.user.email,
-    amount:      order.totalAmount,
-    reference,
-    callbackUrl: `${config.CLIENT_URL}/checkout/verify?reference=${reference}`,
-    metadata: {
-      orderId: order._id.toString(),
-      userId:  req.user.id.toString(),
-    },
-  });
+  let result;
+  try {
+    result = await initializePayment({
+      email:       req.user.email,
+      amount:      order.totalAmount,
+      reference,
+      callbackUrl: `${config.CLIENT_URL}/checkout/verify?reference=${reference}`,
+      metadata: {
+        orderId: order._id.toString(),
+        userId:  req.user.id.toString(),
+      },
+    });
+  } catch (err) {
+    const paystackError = err.response?.data?.message || err.message;
+    console.error('Paystack initialize error:', paystackError);
+    return res.status(502).json({ message: 'Payment gateway error', detail: paystackError });
+  }
 
-  if (!result.status) {
+  if (!result?.status) {
     return res.status(502).json({ message: 'Failed to initialize payment' });
   }
 
@@ -63,8 +72,16 @@ const verifyTransaction = catchAsync(async (req, res) => {
     return res.json({ order, message: 'Already processed' });
   }
 
-  const result = await verifyPayment(reference);
-  if (!result.status || result.data.status !== 'success') {
+  let result;
+  try {
+    result = await verifyPayment(reference);
+  } catch (err) {
+    const paystackError = err.response?.data?.message || err.message;
+    console.error('Paystack verify error:', paystackError);
+    return res.status(502).json({ message: 'Payment gateway error', detail: paystackError });
+  }
+
+  if (!result?.status || result.data.status !== 'success') {
     return res.status(402).json({ message: 'Payment not successful' });
   }
 
