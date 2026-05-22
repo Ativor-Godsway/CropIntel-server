@@ -26,15 +26,9 @@ const validateProduct = [
     .trim()
     .isIn(VALID_CATEGORIES).withMessage(`Category must be one of: ${VALID_CATEGORIES.join(', ')}`),
 
+  // FormData sends targetDiseases as a comma-separated string; accept any string or array
   body('targetDiseases')
-    .optional()
-    .isArray().withMessage('targetDiseases must be an array'),
-
-  body('targetDiseases.*')
-    .optional()
-    .trim()
-    .isLength({ max: 100 }).withMessage('Each disease name must be under 100 characters')
-    .escape(),
+    .optional(),
 
   handleValidationErrors,
 ];
