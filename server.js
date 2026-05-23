@@ -31,6 +31,7 @@ const analyticsRoutes = require("./routes/analyticsRoutes");
 require("./config/passport");
 
 const app = express();
+app.set('trust proxy', 1); // Required for correct IP detection behind Render's proxy
 
 // ── Database ──────────────────────────────────────────────────────────────────
 connectDB();
