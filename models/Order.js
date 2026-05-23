@@ -19,8 +19,8 @@ const orderSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'processing', 'shipped', 'delivered', 'cancelled'],
       default: 'pending',
     },
-    paystackReference: { type: String },
-    paystackTransactionId: { type: String },
+    paystackReference: { type: String, default: null },
+    paystackTransactionId: { type: String, default: null },
     shippingAddress: {
       fullName: { type: String, required: true },
       phone: { type: String, required: true },

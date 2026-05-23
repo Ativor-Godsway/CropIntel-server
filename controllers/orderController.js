@@ -38,12 +38,18 @@ const createOrder = catchAsync(async (req, res) => {
     items: orderItems,
     totalAmount,
     shippingAddress,
-    status: 'pending',
+    status: 'paid',
+    paystackReference: `MOCK-${Date.now()}`,
     ...(diagnosisId && mongoose.isValidObjectId(diagnosisId) && { diagnosisId }),
   });
 
   await order.populate('items.product', 'name images');
-  res.status(201).json({ order });
+  res.status(201).json({
+    status: 'success',
+    message: 'Order placed successfully',
+    data: { order },
+    order, // keep for any existing frontend references
+  });
 });
 
 // ─── GET /api/orders/my-orders ────────────────────────────────────────────────
